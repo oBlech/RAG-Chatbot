@@ -1,7 +1,8 @@
 'use client'
 
-import { useState, useEffect, useRef, FormEvent, ChangeEvent } from 'react'
+import { useState, useEffect, useRef, ChangeEvent } from 'react'
 import axios from 'axios'
+import { UploadCloud, Trash2, FileText, Database, Loader2, AlertCircle, CheckCircle2 } from 'lucide-react'
 
 interface Document {
   source_id: string
@@ -18,33 +19,17 @@ interface UploadStatus {
   message: string
 }
 
-function DocumentSkeleton() {
-  return (
-    <div className="flex items-center justify-between p-4 bg-white/5 rounded-lg border border-white/10">
-      <div className="flex items-center space-x-3 flex-1">
-        <div className="w-8 h-8 skeleton rounded"></div>
-        <div className="flex-1">
-          <div className="h-4 skeleton rounded mb-2 w-3/4"></div>
-          <div className="h-3 skeleton rounded w-1/2"></div>
-        </div>
-      </div>
-      <div className="w-20 h-8 skeleton rounded"></div>
-    </div>
-  )
-}
-
 function getFilename(sourceId: string): string {
-  // Extract just the filename from path (handles both / and \ separators)
   const parts = sourceId.split(/[/\\]/)
   return parts[parts.length - 1] || sourceId
 }
 
 export default function AdminPanel() {
   const [documents, setDocuments] = useState<Document[]>([])
-  const [loading, setLoading] = useState<boolean>(false)
+  const [loading, setLoading] = useState<boolean>(true)
   const [uploading, setUploading] = useState<boolean>(false)
-  const [file, setFile] = useState<File | null>(null)
   const [uploadStatus, setUploadStatus] = useState<UploadStatus | null>(null)
+  const [dragActive, setDragActive] = useState<boolean>(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -63,21 +48,12 @@ export default function AdminPanel() {
     }
   }
 
-  const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = e.target.files?.[0]
-    if (selectedFile && selectedFile.type === 'application/pdf') {
-      setFile(selectedFile)
-      setUploadStatus(null)
-      
-      // Auto-upload when file is selected
-      await handleUploadFile(selectedFile)
-    } else {
-      setUploadStatus({ type: 'error', message: 'Please select a PDF file' })
-      setFile(null)
+  const handleFile = async (selectedFile: File) => {
+    if (selectedFile.type !== 'application/pdf') {
+      setUploadStatus({ type: 'error', message: 'Please select a valid PDF file' })
+      return
     }
-  }
 
-  const handleUploadFile = async (selectedFile: File) => {
     setUploading(true)
     setUploadStatus(null)
 
@@ -86,38 +62,57 @@ export default function AdminPanel() {
 
     try {
       const response = await axios.post<UploadResponse>('/api/upload', formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
+        headers: { 'Content-Type': 'multipart/form-data' },
       })
       setUploadStatus({
         type: 'success',
-        message: `Successfully uploaded ${response.data.source_id} (${response.data.chunks_ingested} chunks)`,
+        message: `Successfully indexed "${response.data.source_id}" (${response.data.chunks_ingested} chunks)`,
       })
-      setFile(null)
-      if (fileInputRef.current) {
-        fileInputRef.current.value = ''
-      }
       loadDocuments()
     } catch (error) {
       setUploadStatus({
         type: 'error',
         message: axios.isAxiosError(error) ? (error.response?.data?.detail || error.message) : 'An unexpected error occurred',
       })
-      setFile(null)
     } finally {
       setUploading(false)
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }
+
+  const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = e.target.files?.[0]
+    if (selectedFile) await handleFile(selectedFile)
+  }
+
+  const handleDrag = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.type === 'dragenter' || e.type === 'dragover') {
+      setDragActive(true)
+    } else if (e.type === 'dragleave') {
+      setDragActive(false)
+    }
+  }
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setDragActive(false)
+    
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      await handleFile(e.dataTransfer.files[0])
     }
   }
 
   const handleDelete = async (sourceId: string) => {
-    if (!confirm(`Are you sure you want to delete "${sourceId}"?`)) return
+    if (!confirm(`Are you sure you want to permanently delete "${getFilename(sourceId)}"?`)) return
 
     try {
       await axios.delete(`/api/documents/${encodeURIComponent(sourceId)}`)
       setUploadStatus({
         type: 'success',
-        message: `Successfully deleted ${sourceId}`,
+        message: `Successfully deleted ${getFilename(sourceId)}`,
       })
       loadDocuments()
     } catch (error) {
@@ -129,79 +124,128 @@ export default function AdminPanel() {
   }
 
   return (
-    <div className="space-y-6">
-      {/* Upload Section */}
-      <div className="backdrop-blur-sm bg-white/5 rounded-xl p-6 border border-white/10">
-        <h2 className="text-xl font-semibold text-white mb-4">Upload PDF Document</h2>
-        <div className="space-y-4">
-          <input
-            type="file"
-            accept=".pdf"
-            onChange={handleFileChange}
-            ref={fileInputRef}
-            className="hidden"
-            disabled={uploading}
-          />
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading}
-            className="px-6 py-3 bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 text-white rounded-lg disabled:bg-gray-600 disabled:cursor-not-allowed transition-colors font-medium shadow-lg hover:shadow-xl disabled:shadow-none"
+    <div className="flex flex-col h-full w-full">
+      <div className="flex-1 overflow-y-auto scrollbar-hide w-full">
+        <div className="max-w-5xl mx-auto px-6 py-8 space-y-8">
+        
+        {/* Upload Zone */}
+        <section>
+          <div className="mb-4">
+            <h3 className="text-sm font-semibold text-zinc-100">Add Documents</h3>
+            <p className="text-xs text-zinc-400 mt-1">Upload PDF files to add them to your AI's knowledge base.</p>
+          </div>
+          
+          <div
+            className={`relative border-2 border-dashed rounded-xl p-8 text-center transition-all ${
+              dragActive 
+                ? 'border-indigo-500 bg-indigo-500/5' 
+                : 'border-zinc-800 bg-zinc-900/50 hover:bg-zinc-900 hover:border-zinc-700'
+            } ${uploading ? 'opacity-50 pointer-events-none' : ''}`}
+            onDragEnter={handleDrag}
+            onDragLeave={handleDrag}
+            onDragOver={handleDrag}
+            onDrop={handleDrop}
           >
-            {uploading ? 'Uploading...' : 'Upload'}
-          </button>
+            <input
+              type="file"
+              accept=".pdf"
+              onChange={handleFileChange}
+              ref={fileInputRef}
+              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+              disabled={uploading}
+            />
+            <div className="flex flex-col items-center justify-center gap-3 pointer-events-none">
+              <div className="p-3 bg-zinc-800/50 rounded-full border border-zinc-700/50">
+                {uploading ? (
+                  <Loader2 className="w-6 h-6 text-indigo-400 animate-spin" />
+                ) : (
+                  <UploadCloud className="w-6 h-6 text-zinc-400" />
+                )}
+              </div>
+              <div>
+                <p className="text-sm font-medium text-zinc-200">
+                  {uploading ? 'Processing document...' : 'Click or drag PDF to upload'}
+                </p>
+                <p className="text-xs text-zinc-500 mt-1">Max file size: 50MB</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Status Message */}
           {uploadStatus && (
-            <div
-              className={`mt-4 p-3 rounded-lg ${
-                uploadStatus.type === 'success'
-                  ? 'bg-green-500/20 text-green-300 border border-green-500/30'
-                  : 'bg-red-500/20 text-red-300 border border-red-500/30'
-              }`}
-            >
-              {uploadStatus.message}
+            <div className={`mt-4 p-4 rounded-lg flex items-start gap-3 border ${
+              uploadStatus.type === 'success' 
+                ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' 
+                : 'bg-red-500/10 border-red-500/20 text-red-400'
+            }`}>
+              {uploadStatus.type === 'success' ? (
+                <CheckCircle2 className="w-5 h-5 flex-shrink-0" />
+              ) : (
+                <AlertCircle className="w-5 h-5 flex-shrink-0" />
+              )}
+              <p className="text-sm font-medium leading-relaxed">{uploadStatus.message}</p>
             </div>
           )}
-        </div>
-      </div>
+        </section>
 
-      {/* Documents List */}
-      <div className="backdrop-blur-sm bg-white/5 rounded-xl p-6 border border-white/10">
-        <h2 className="text-xl font-semibold text-white mb-4">Documents in System</h2>
-        {loading ? (
-          <div className="space-y-2">
-            <DocumentSkeleton />
-            <DocumentSkeleton />
-            <DocumentSkeleton />
+        {/* Document List */}
+        <section>
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-semibold text-zinc-100">Indexed Documents</h3>
+              <p className="text-xs text-zinc-400 mt-1">Manage files currently available to the AI.</p>
+            </div>
+            <div className="text-xs font-medium text-zinc-500 bg-zinc-900 px-2.5 py-1 rounded-md border border-zinc-800">
+              {documents.length} files
+            </div>
           </div>
-        ) : documents.length === 0 ? (
-          <div className="text-center py-8 text-gray-400">
-            <div className="text-4xl mb-2">📄</div>
-            <p>No documents uploaded yet</p>
-            <p className="text-sm mt-1">Upload a PDF to get started</p>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {documents.map((doc) => (
-              <div
-                key={doc.source_id}
-                className="flex items-center justify-between p-4 bg-white/5 rounded-lg border border-white/10 hover:border-white/20 hover:bg-white/10 transition-colors"
-              >
-                <div className="flex items-center space-x-3">
-                  <div className="text-2xl">📄</div>
-                  <div>
-                    <div className="font-medium text-white">{getFilename(doc.source_id)}</div>
+
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
+            {loading ? (
+              <div className="divide-y divide-zinc-800/50">
+                {[...Array(3)].map((_, i) => (
+                  <div key={i} className="p-4 flex items-center justify-between animate-pulse">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 bg-zinc-800 rounded-lg"></div>
+                      <div className="w-48 h-4 bg-zinc-800 rounded"></div>
+                    </div>
+                    <div className="w-8 h-8 bg-zinc-800 rounded-lg"></div>
                   </div>
-                </div>
-                <button
-                  onClick={() => handleDelete(doc.source_id)}
-                  className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors text-sm font-medium"
-                >
-                  Delete
-                </button>
+                ))}
               </div>
-            ))}
+            ) : documents.length === 0 ? (
+              <div className="p-8 text-center flex flex-col items-center justify-center">
+                <FileText className="w-8 h-8 text-zinc-600 mb-3" />
+                <p className="text-sm font-medium text-zinc-300">No documents found</p>
+                <p className="text-xs text-zinc-500 mt-1">Upload a document to get started</p>
+              </div>
+            ) : (
+              <div className="divide-y divide-zinc-800/50">
+                {documents.map((doc) => (
+                  <div key={doc.source_id} className="p-4 flex items-center justify-between hover:bg-zinc-800/30 transition-colors group">
+                    <div className="flex items-center gap-3 overflow-hidden pr-4">
+                      <div className="p-2 bg-zinc-800 rounded-lg flex-shrink-0 border border-zinc-700/50 group-hover:bg-indigo-500/10 group-hover:border-indigo-500/20 transition-colors">
+                        <FileText className="w-4 h-4 text-zinc-400 group-hover:text-indigo-400 transition-colors" />
+                      </div>
+                      <span className="text-sm font-medium text-zinc-300 truncate">
+                        {getFilename(doc.source_id)}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => handleDelete(doc.source_id)}
+                      className="p-2 text-zinc-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-all opacity-0 group-hover:opacity-100 flex-shrink-0 focus:opacity-100"
+                      title="Delete document"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
-        )}
+        </section>
+
+      </div>
       </div>
     </div>
   )

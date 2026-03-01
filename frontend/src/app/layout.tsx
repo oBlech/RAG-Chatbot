@@ -10,7 +10,7 @@ const inter = Inter({
 
 export const metadata: Metadata = {
   title: "Blech's RAG",
-  description: 'Ask away!',
+  description: 'Enterprise Search and Retrieval',
 }
 
 export default function RootLayout({
@@ -19,8 +19,10 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en" className={inter.variable}>
-      <body className={inter.className}>{children}</body>
+    <html lang="en" className={`${inter.variable} antialiased dark`}>
+      <body className="bg-zinc-950 text-zinc-50 min-h-screen">
+        {children}
+      </body>
     </html>
   )
 }
