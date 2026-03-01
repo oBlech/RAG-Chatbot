@@ -119,7 +119,7 @@ class DocumentResponse(BaseModel):
 
 @app.post("/api/query", response_model=QueryResponse)
 async def query_rag(request: QueryRequest):
-    """Query the RAG system."""
+    
     try:
         store = QdrantStorage()
         query_vec = embed_texts([request.question])[0]
@@ -163,8 +163,8 @@ async def query_rag(request: QueryRequest):
 
 @app.post("/api/upload")
 async def upload_pdf(file: UploadFile = File(...)):
-    """Upload and ingest a PDF file."""
-    if not file.filename.endswith('.pdf'):
+    
+    if not file.filename or not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
     
     temp_file = None
@@ -192,7 +192,7 @@ async def upload_pdf(file: UploadFile = File(...)):
 
 @app.get("/api/documents", response_model=List[DocumentResponse])
 async def list_documents():
-    """List all documents in the system."""
+    
     try:
         store = QdrantStorage()
         sources = store.list_sources()
@@ -202,7 +202,7 @@ async def list_documents():
 
 @app.delete("/api/documents/{source_id}")
 async def delete_document(source_id: str):
-    """Delete a document from the system."""
+    
     try:
         store = QdrantStorage()
         deleted_count = store.delete_by_source(source_id)

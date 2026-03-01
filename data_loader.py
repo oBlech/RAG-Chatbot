@@ -20,8 +20,14 @@ def load_and_chunk_pdf(path: str):
     return chunks
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    response = client.embeddings.create(
-        model=EMBED_MODEL,
-        input = texts,
-    )
-    return [item.embedding for item in response.data]
+    if not texts:
+        return []
+    embeddings = []
+    for i in range(0, len(texts), 2000):
+        batch = texts[i:i + 2000]
+        response = client.embeddings.create(
+            model=EMBED_MODEL,
+            input = batch,
+        )
+        embeddings.extend([item.embedding for item in response.data])
+    return embeddings
