@@ -13,7 +13,7 @@ import tempfile
 import shutil
 from typing import List
 from pydantic import BaseModel
-from data_loader import load_and_chunk_pdf, embed_texts
+from data_loader import load_and_chunk_pdf, load_and_chunk_spreadsheet, embed_texts
 from vector_db import QdrantStorage
 from custom_types import RAGChunkAndSrc, RAGQueryResult, RAGSearchResult, RAGUpsertResult
 
@@ -32,9 +32,13 @@ inngest_client = inngest.Inngest(
 )
 async def rag_ingest_pdf(ctx: inngest.Context):
     def _load(ctx: inngest.Context) -> RAGChunkAndSrc:
-        pdf_path = ctx.event.data["pdf_path"]
-        source_id = ctx.event.data.get("source_id", pdf_path)
-        chunks = load_and_chunk_pdf(pdf_path)
+        doc_path = ctx.event.data.get("doc_path") or ctx.event.data.get("pdf_path")
+        source_id = ctx.event.data.get("source_id", doc_path)
+        ext = os.path.splitext(doc_path)[1].lower()
+        if ext in ['.csv', '.xlsx', '.xls']:
+            chunks = load_and_chunk_spreadsheet(doc_path)
+        else:
+            chunks = load_and_chunk_pdf(doc_path)
         return RAGChunkAndSrc(chunks=chunks, source_id=source_id)
 
     def _upsert(chunks_and_src: RAGChunkAndSrc) -> RAGUpsertResult:
@@ -55,23 +59,30 @@ async def rag_ingest_pdf(ctx: inngest.Context):
     trigger=inngest.TriggerEvent(event="rag/query_pdf_ai")
 )
 async def rag_query_pdf_ai(ctx: inngest.Context):
-    def _search(question: str, top_k: int = 5):
+    def _search(question: str, top_k: int = 15):
         query_vec = embed_texts([question])[0]
         store = QdrantStorage()
         found = store.search(query_vec, top_k)
         return RAGSearchResult(contexts=found["contexts"], sources=found["sources"])
 
     question = ctx.event.data["question"]
-    top_k = int(ctx.event.data.get("top_k", 5))
+    top_k = int(ctx.event.data.get("top_k", 15))
 
     found = await ctx.step.run("embed-and-search", lambda: _search(question, top_k), output_type=RAGSearchResult)
 
     context_block = "\n\n".join(f"- {c}" for c in found.contexts)
+    
+    system_prompt = (
+        "You are an expert AI knowledge assistant. Your goal is to provide comprehensive, "
+        "detailed, and highly accurate answers based strictly on the provided context. "
+        "Fully utilize all the relevant information from the context to form a complete response. "
+        "If the context does not contain the answer, politely state that you do not have enough information."
+    )
+    
     user_content = (
-        "Use the following context to answer the question. \n\n"
+        "Here is the context I found for you: \n\n"
         f"Context: \n{context_block}\n\n"
-        f"Question: {question}\n"
-        "Answer concisely using the context above."
+        f"Question: {question}"
     )
 
     adapter = ai.openai.Adapter(
@@ -86,7 +97,7 @@ async def rag_query_pdf_ai(ctx: inngest.Context):
             "max_tokens":1024,
             "temperature":0.2,
             "messages": [
-                {"role": "system", "content": "You answer questions using only the provided context."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content}
             ]
         }
@@ -107,7 +118,8 @@ app.add_middleware(
 
 class QueryRequest(BaseModel):
     question: str
-    top_k: int = 5
+    top_k: int = 15
+    history: List[dict] = []
 
 class QueryResponse(BaseModel):
     answer: str
@@ -119,40 +131,78 @@ class DocumentResponse(BaseModel):
 
 @app.post("/api/query", response_model=QueryResponse)
 async def query_rag(request: QueryRequest):
-    
+
     try:
         store = QdrantStorage()
         query_vec = embed_texts([request.question])[0]
         found = store.search(query_vec, request.top_k)
-        
+
         if not found["contexts"]:
+            await inngest_client.send(
+                inngest.Event(
+                    name="rag/query.executed",
+                    data={"question": request.question, "num_contexts": 0, "found_answer": False}
+                )
+            )
             return QueryResponse(
                 answer="I couldn't find any relevant information in the documents to answer your question.",
                 sources=[],
                 num_contexts=0
             )
-        
+
         context_block = "\n\n".join(f"- {c}" for c in found["contexts"])
-        user_content = (
-            "Use the following context to answer the question. \n\n"
-            f"Context: \n{context_block}\n\n"
-            f"Question: {request.question}\n"
-            "Answer concisely using the context above."
+
+        system_prompt = (
+            "You are an expert AI knowledge assistant. Your goal is to provide comprehensive, "
+            "detailed, and highly accurate answers based strictly on the provided context. "
+            "Fully utilize all the relevant information from the context to form a complete response. "
+            "CRITICAL INSTRUCTION: If the user asks you to calculate a sum, count, or average across the dataset, "
+            "be aware that you only have a *partial* snapshot of the data (the top search results). "
+            "You MUST state that your calculation is only based on the visible search results and may not reflect the entire document. "
+            "Do not hallucinate or make up math. "
+            "If the context does not contain the answer, politely state that you do not have enough information."
         )
-        
+
+        user_content = (
+            "Here is the context I found for you: \n\n"
+            f"Context: \n{context_block}\n\n"
+            f"Current Question: {request.question}"
+        )
+
+        # Build the message chain
+        messages = [{"role": "system", "content": system_prompt}]
+
+        # Append history to give the model memory of the conversation
+        for msg in request.history:
+            # ensure only valid roles are passed
+            if msg.get("role") in ["user", "assistant"]:
+                messages.append({"role": msg["role"], "content": msg.get("content", "")})
+
+        # Append the current prompt with context
+        messages.append({"role": "user", "content": user_content})
+
         from openai import OpenAI
         openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You answer questions using only the provided context."},
-                {"role": "user", "content": user_content}
-            ],
+            messages=messages,
             max_tokens=1024,
             temperature=0.2
+        )        
+        answer = response.choices[0].message.content.strip()
+        
+        await inngest_client.send(
+            inngest.Event(
+                name="rag/query.executed",
+                data={
+                    "question": request.question,
+                    "num_contexts": len(found["contexts"]),
+                    "sources": found["sources"],
+                    "found_answer": True
+                }
+            )
         )
         
-        answer = response.choices[0].message.content.strip()
         return QueryResponse(
             answer=answer,
             sources=found["sources"],
@@ -162,18 +212,26 @@ async def query_rag(request: QueryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/upload")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_document(file: UploadFile = File(...)):
     
-    if not file.filename or not file.filename.endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename missing")
+    
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in ['.pdf', '.csv', '.xlsx', '.xls']:
+        raise HTTPException(status_code=400, detail="Only PDF, CSV, and Excel files are supported")
     
     temp_file = None
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
             shutil.copyfileobj(file.file, tmp)
             temp_file = tmp.name
         
-        chunks = load_and_chunk_pdf(temp_file)
+        if ext == '.pdf':
+            chunks = load_and_chunk_pdf(temp_file)
+        else:
+            chunks = load_and_chunk_spreadsheet(temp_file)
+            
         source_id = os.path.basename(file.filename)
         
         vecs = embed_texts(chunks)
@@ -182,6 +240,17 @@ async def upload_pdf(file: UploadFile = File(...)):
         
         store = QdrantStorage()
         store.upsert(ids, vecs, payloads)
+        
+        await inngest_client.send(
+            inngest.Event(
+                name="rag/document.uploaded",
+                data={
+                    "source_id": source_id,
+                    "chunks_ingested": len(chunks),
+                    "file_type": ext
+                }
+            )
+        )
         
         return {"message": f"Successfully uploaded {source_id}", "chunks_ingested": len(chunks), "source_id": source_id}
     except Exception as e:
@@ -208,6 +277,17 @@ async def delete_document(source_id: str):
         deleted_count = store.delete_by_source(source_id)
         if deleted_count == 0:
             raise HTTPException(status_code=404, detail=f"Document {source_id} not found")
+        
+        await inngest_client.send(
+            inngest.Event(
+                name="rag/document.deleted",
+                data={
+                    "source_id": source_id,
+                    "points_deleted": deleted_count
+                }
+            )
+        )
+        
         return {"message": f"Successfully deleted {source_id}", "points_deleted": deleted_count}
     except HTTPException:
         raise

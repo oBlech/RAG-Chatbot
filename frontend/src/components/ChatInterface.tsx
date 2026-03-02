@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, FormEvent, ChangeEvent } from 'react'
 import axios from 'axios'
 import { Send, Bot, User, Loader2, Sparkles, FileText } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -22,12 +23,33 @@ function getFilename(sourceId: string): string {
   return parts[parts.length - 1] || sourceId
 }
 
-export default function ChatInterface() {
+export default function ChatInterface({ sessionId, onUpdateTitle }: { sessionId: string, onUpdateTitle: (title: string) => void }) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState<string>('')
   const [loading, setLoading] = useState<boolean>(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  // Load from local storage on initial render
+  useEffect(() => {
+    const savedMessages = localStorage.getItem(`rag_chat_history_${sessionId}`)
+    if (savedMessages) {
+      try {
+        setMessages(JSON.parse(savedMessages))
+      } catch (e) {
+        console.error("Failed to load chat history", e)
+      }
+    } else {
+      setMessages([])
+    }
+  }, [sessionId])
+
+  // Save to local storage whenever messages change
+  useEffect(() => {
+    if (messages.length > 0) {
+      localStorage.setItem(`rag_chat_history_${sessionId}`, JSON.stringify(messages))
+    }
+  }, [messages, sessionId])
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -50,7 +72,14 @@ export default function ChatInterface() {
     if (!input.trim() || loading) return
 
     const userMessage: Message = { role: 'user', content: input }
+    const isFirstMessage = messages.length === 0
     setMessages(prev => [...prev, userMessage])
+    
+    if (isFirstMessage) {
+      const newTitle = input.trim().substring(0, 30) + (input.trim().length > 30 ? '...' : '')
+      onUpdateTitle(newTitle)
+    }
+
     const currentInput = input
     setInput('')
     setLoading(true)
@@ -58,7 +87,8 @@ export default function ChatInterface() {
     try {
       const response = await axios.post<QueryResponse>('/api/query', {
         question: currentInput,
-        top_k: 5
+        top_k: 15,
+        history: messages.map(msg => ({ role: msg.role, content: msg.content }))
       })
 
       const assistantMessage: Message = {
@@ -80,7 +110,7 @@ export default function ChatInterface() {
   }
 
   return (
-    <div className="flex flex-col h-full w-full">
+    <div className="flex flex-col h-full w-full relative">
       <div className="flex-1 overflow-hidden flex flex-col w-full max-w-5xl mx-auto">
         {/* Messages */}
         <div className="flex-1 overflow-y-auto px-6 py-8 scrollbar-hide flex flex-col">
@@ -123,7 +153,20 @@ export default function ChatInterface() {
                     : 'bg-zinc-900 text-zinc-300 border border-zinc-800 rounded-tl-sm shadow-sm'
                 }`}
               >
-                <div className="whitespace-pre-wrap">{msg.content}</div>
+                <div className={`markdown-content ${msg.role === 'user' ? 'user-markdown' : ''}`}>
+                  <ReactMarkdown
+                    components={{
+                      p: ({ node, ...props }) => <p className="mb-2 last:mb-0" {...props} />,
+                      ul: ({ node, ...props }) => <ul className="list-disc pl-5 mb-2" {...props} />,
+                      ol: ({ node, ...props }) => <ol className="list-decimal pl-5 mb-2" {...props} />,
+                      li: ({ node, ...props }) => <li className="mb-1" {...props} />,
+                      strong: ({ node, ...props }) => <strong className="font-semibold" {...props} />,
+                      a: ({ node, ...props }) => <a className="text-indigo-400 hover:underline" {...props} />
+                    }}
+                  >
+                    {msg.content}
+                  </ReactMarkdown>
+                </div>
               </div>
 
               {msg.sources && msg.sources.length > 0 && (
