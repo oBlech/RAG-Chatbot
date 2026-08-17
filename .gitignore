@@ -83,7 +83,7 @@ Desktop.ini
 
 # Qdrant storage (local database)
 # Uncomment if you don't want to commit the vector database
-# qdrant_storage/
+qdrant_storage/
 
 # Logs
 *.log
